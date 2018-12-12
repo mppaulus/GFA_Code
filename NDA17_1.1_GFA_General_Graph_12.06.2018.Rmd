@@ -1,0 +1,576 @@
+---
+title: "ABCD NDA 17 Release 1.1. Analyses: GFA"
+author: "Martin P Paulus"
+date: "12/06/2018"
+output: 
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Example Libraries to use:
+# library(psych)
+
+library(Hmisc)
+library(GFA)
+library(tidyverse)
+library(MatchIt)
+
+# For making the output nicer
+library(plotrix)
+library(kableExtra)
+
+```
+
+```{r General Setup, echo=FALSE}
+
+rm(list=ls())
+setwd("/Users/mpaulus/Dropbox (Personal)/Private/RDataAnalysis/ABCD_Data/NDA1.1/")
+# list.files()
+
+mydir <- paste0("/Users/mpaulus/Dropbox (Personal)/Private/RDataAnalysis/ABCD_Data/NDA1.1/")
+
+source('robustGFA Fcn.R') 
+
+```
+
+```{r Common Code, echo=TRUE}
+
+# Loading an RData file:
+loadRData <- function(fileName){
+  #loads an RData file, and returns it
+  load(fileName)
+  get(ls()[ls() != "fileName"])
+}
+
+# Common functions for analyses
+
+vis.W <- function(res,comp.use,block.names=NULL,pct.CI, GFAlabel) {
+  if (!is.na(pct.CI)){
+    lo = (1-pct.CI)/2
+    up = 1 - lo
+    cred.int <- apply(res$posterior$W[,,comp.use], 2:3, function(x) quantile(x, c(lo, up)))
+    x <- res$W[,comp.use] * (apply(cred.int, 2:3, prod)>0)*1
+  } else { 
+    x <- res$W[,comp.use] 
+  }
+  colnames(x) <- GFAlabel
+  D <- nrow(x); K <- ncol(x)
+  gr <- res$groups; M <- length(gr)
+  if (is.null(block.names)) { names(gr) <- paste("Source",1:M) }
+  else { names(gr) <- block.names }
+  gr1 <- c(0,cumsum(sapply(gr,length))); names(gr1) <- c(names(gr),"NA")
+  
+  mar <- c(6,4,4,6)
+  par(mar=mar)
+  cols <- colorRampPalette(c("orange","red","white","blue","cyan"))(19)
+  if(any(is.na(x))) cols <- colorRampPalette(c("orange","red","#DDDDDD","blue","cyan"))(19)
+  M <- max(abs(x),na.rm=T)
+  breaks <- seq(-M,M,length=20)
+  
+  title <- c("GFA Matrix","Components","Features")
+  if (length(comp.use)==res$K){
+    title[1] <- paste0(title[1], ' (all components & ', sum(x), ' loadings)')
+  }
+  if (!is.na(pct.CI)){
+    title[1] <- paste0(title[1], ' (', sum(x!=0),' loadings: ',pct.CI*100,'% Credible Interval)')
+  }
+  image(1:D,1:K,x[,K:1],col=cols,breaks=breaks,axes=F,main=title[1],
+        xlab="",ylab="")
+  title(xlab=title[3],line=mar[1]-1)
+  title(ylab=title[2],line=mar[2]-1)
+  box()
+  par(las=2)
+  axis(1, 1:D, rownames(x), cex.axis=D^(-1/5))
+  axis(2, K:1, colnames(x), cex.axis=K^(-1/5))
+  
+  #Grouping
+  par(xpd=T)
+  mu <- gr1[-1]/2+gr1[-length(gr1)]/2
+  N <- K
+  for(i in 1:length(mu)) {
+    if(i!=length(mu)) lines(rep(gr1[i+1]+1/2,2), c(.5, N*1.03+.5), lwd=2)
+    text(mu[i],N*1.03+.5,names(gr1)[i])
+  }
+  #Colorbar
+  n <- length(cols)
+  cba <- D + 1/2 + D/60; cbw <- D/40
+  for(i in 1:n){
+    polygon(c(0,cbw,cbw,0)+cba, c(0,0,N/n,N/n)+N*(i-1)/n+1/2,
+            col=cols[i], border=NA)
+  }
+  #Colorbar: axis
+  lines(rep(cba+cbw,2),c(0,N)+1/2)
+  m <- 10^floor(log10(M)); m <- floor(M/m)*m
+  for(l in c(-m,0,m)) {
+    ly <- N*(l/M/2+.5)+1/2
+    lines(cba+cbw-c(cbw,-cbw)/5, rep(ly,2))
+    text(cba+cbw*2.5,ly,l)
+  }
+  par(xpd=F)
+}
+
+## @knitr repRow
+
+# Need this function
+rep.row<-function(x,n){
+  matrix(rep(x,each=n),nrow=n)
+}
+
+## @knitr myGamm
+myGAMM4 <- function(dv,iv,cv,nv,dat)
+{
+  
+  indv <- paste(iv, collapse=" + ")
+  cova <- paste(cv, collapse=" + ")
+  nstv <- paste("~","(","1","|",nv[1],"/",nv[2],")",sep="")
+  
+  datnames <- names(dat)
+  
+  if(iv %in% datnames) {
+    form1 <- paste(dv," ~ ",indv," + ",cova,sep="")
+  } else { form1 <- paste(dv," ~ ",cova,sep="")}
+  
+  # print(form1)
+  # print(nstv)
+  
+  mygam <- gamm4(as.formula(form1), random = as.formula(nstv), data = dat)
+  
+  return(mygam)
+}
+
+
+## @knitr VarExp
+
+# Variance explained by GFA
+
+var.exp <- function(res, elbow){
+  ps.mean.W <- apply(res$posterior$W, 2:3, mean)
+  ve <- colMeans(ps.mean.W^2)*100
+  tmp <- ve[order(-ve)]
+  cum.sum <- cumsum(tmp)
+  
+  print(paste0('All ',res$K, ' components explain ', round(sum(tmp),1),'% variance'))
+  
+  plot(1:length(tmp), tmp, 
+       xlab='Ordered component', ylab='% variance', type='b',
+       main='Components by Variance Explained')
+  abline(h=tmp[elbow], lty=2)
+  plot(1:length(tmp), cum.sum, type='b', xlab='Ordered component', 
+       ylab='Cumulative % variance explained', 
+       main=paste0('The ', elbow, ' components explain ', round(cum.sum[elbow],1), '% variance'))
+  abline(h=cum.sum[elbow], v=elbow, lty=2) 
+  plot(1:length(ve), ve, xlab='Component', ylab='% variance', type='b',
+       main='Components as extracted in GFA')
+  abline(h=tmp[elbow], lty=2)
+  # return(round(ve,1))
+  use <- order(-ve)[1:elbow]
+  use <- cbind(use,tmp[1:elbow])
+  return(use)
+}
+
+# Circular Plot of the GFA Data
+Circbar <- function(mydata, ebar,graphtitle){
+  
+  data <- mydata
+  
+  # Assign min and max
+  
+  mymin <- ifelse(-1.5 + min(mydata$CI025) < -2,-1.5 + min(mydata$CI025),-2)
+  mymax <- ifelse(1 + max(mydata$CI975) < 1, 1, 1 + max(mydata$CI975))
+  
+  # Set the level lines
+  ifelse(min(mydata$CI025) < -.1, minx <- min(mydata$CI025), minx <- -.1)
+  ifelse(min(mydata$CI975) < minx, minx <- min(mydata$CI975), minx <- minx)
+  ifelse(max(mydata$CI975) > .1, maxx <- max(mydata$CI975), maxx <- .1)
+  ifelse(max(mydata$CI025) > maxx, maxx <- max(mydata$CI025), maxx <- maxx)
+  
+  # Set a number of 'empty bar' to add at the end of each group
+  empty_bar <- ebar
+  
+  to_add = data.frame( matrix(NA, empty_bar*nlevels(data$GFAgroups), ncol(data)) )
+  colnames(to_add) = colnames(data)
+  to_add$GFAgroups=rep(levels(data$GFAgroups), each=empty_bar)
+  data=rbind(data, to_add)
+  data=data %>% arrange(GFAgroups)
+  data$id=seq(1, nrow(data))
+  
+  # Get the name and the y position of each label
+  label_data=data
+  number_of_bar=nrow(label_data)
+  angle= 90 - 360 * (label_data$id-0.5) /number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+  label_data$hjust<-ifelse( angle < -90, 1, 0)
+  label_data$angle<-ifelse(angle < -90, angle+180, angle)
+  
+  # prepare a data frame for base lines
+  
+  base_data=data %>% 
+  group_by(GFAgroups) %>% 
+  dplyr::summarize(start=min(id), end=max(id) - empty_bar) %>% 
+  rowwise() %>% 
+  mutate(Title=mean(c(start, end)))
+
+  # prepare a data frame for grid (scales)
+  grid_data = base_data
+  grid_data$end = grid_data$end[ c( nrow(grid_data), 1:nrow(grid_data)-1)] + 1
+  grid_data$start = grid_data$start - 1
+  #grid_data=grid_data[-1,]
+  
+  # Make the plot
+  p = ggplot(data, aes(x=as.factor(id), y=Median, fill=GFAgroups)) +       
+    # Note that id is a factor. If x is numeric, there is some space between the first bar
+    
+    geom_bar(aes(x=as.factor(id), y=Median, fill=GFAgroups), stat="identity", alpha=0.5)  +
+    geom_errorbar(aes(x=as.factor(id),ymin=CI025,ymax=CI975,color="Gray")) +
+    
+    # Add a level lines.
+ geom_segment(data=grid_data, aes(x = end, y = minx, xend = start, yend = minx), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) + 
+     geom_segment(data=grid_data, aes(x = end, y = 0, xend = start, yend = 0), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) + 
+ geom_segment(data=grid_data, aes(x = end, y = maxx, xend = start, yend = maxx), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE )
+  
+    # Add text showing the value of each level lines
+    p = p + annotate("text", x = rep(max(data$id),3), y = c(minx,0, maxx), label = format(c(minx,0, maxx),digits=2) , color="black", size=3 , angle=0, fontface="bold", hjust=1) +
+    
+    ylim(mymin,mymax) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      panel.grid = element_blank(),
+      plot.margin = unit(rep(-1,4), "cm")
+    ) +
+    coord_polar() +
+    geom_text(data=label_data, aes(x=id, y=mymax-.9, label=GFAvarlabs, hjust=hjust), color="black", fontface="bold",alpha=0.6, size=2.5, angle= label_data$angle, inherit.aes = FALSE )  +
+    
+    # Add base line information
+    geom_segment(data=base_data, aes(x = start, y = -1.1 , xend = end, yend = -1.1, colour=GFAgroups), alpha=0.8, size=1 , inherit.aes = FALSE )  +
+    
+    geom_segment(data=base_data, aes(x = start, y = 0 , xend = end, yend = 0), colour = "Gray", alpha=0.8, size=0.6 , inherit.aes = FALSE )  +
+    
+    geom_text(data=grid_data, aes(x = Title, y = -1.3, label=GFAgroups),color="black", fontface="bold") +
+    
+    annotate("text", x = 0, y = -1.8, label = c(graphtitle) , color="red", size=4 , fontface="bold")
+  
+  return(p)
+  
+}
+
+
+```
+
+```{r, Load supplemental data sets}
+# File components:
+myfile <- c("nda17_1.1_")
+GFAtext <- c("preGFA_")
+dateext <- c("_11.30.2018")
+
+# Free Surfer Data
+chunkfile <- paste0(mydir,myfile,"FS_cort_subcort",".RDATA")
+MPPfs <- loadRData(chunkfile)
+fsnames <- names(MPPfs)
+
+# Cortical Thickness
+thickvars <- fsnames[grep("thick_cort",fsnames)]
+thickvars <- thickvars[-grep("mean",thickvars)]
+# Sulcal Depth
+sulcvars <- fsnames[grep("sulc_cort",fsnames)]
+sulcvars <- sulcvars[-grep("mean",sulcvars)]
+# Gray Matter Volume
+volvars <- fsnames[grep("vol_cort",fsnames)]
+volvars <- volvars[-grep("total",volvars)]
+# Subcortical Volumes
+subcortvars <- fsnames[grep("vol_subcort",fsnames)]
+subcortvars <- subcortvars[-grep("volume",subcortvars)]
+subcortvars <- subcortvars[-grep("wholebrain",subcortvars)]
+subcortvars <- subcortvars[-grep("ventricles",subcortvars)]
+subcortvars <- subcortvars[-grep("_csf",subcortvars)]
+
+# Desikan labels:
+myall <- paste0(mydir,"ABCD_FS_labels",".csv")
+desikan <- read.csv(myall,header=TRUE)
+
+# Reorder variables to fit location and side and label:
+thickvars_r <-thickvars[c(desikan$Order_orig)]
+thicklabels <- paste(desikan[,2],desikan[,4],"TH",sep=" ")
+sulcvars_r <- sulcvars[c(desikan$Order_orig)]
+sulclabels <- paste(desikan[,2],desikan[,4],"SD",sep=" ")
+volvars_r <- volvars[c(desikan$Order_orig)]
+vollabels <- paste(desikan[,2],desikan[,4],"GV",sep=" ")
+
+# Symptom Data - Parent
+chunkfile <- paste0(mydir,myfile,"CBCL",".RDATA")
+MPPcbcl <- loadRData(chunkfile)
+fsnames <- names(MPPcbcl)
+cbclvars <- fsnames[grep("cbcl_scr",fsnames)]
+
+# Symptom Data - Youth
+chunkfile <- paste0(mydir,myfile,"bis",".RDATA")
+MPPbis <- loadRData(chunkfile)
+fsnames <- names(MPPbis)
+bisvars <- fsnames[grep("bis_ss",fsnames)]
+
+chunkfile <- paste0(mydir,myfile,"upps",".RDATA")
+MPPupps <- loadRData(chunkfile)
+fsnames <- names(MPPupps)
+uppsvars <- fsnames[grep("upps_ss",fsnames)]
+
+# Cognition Data
+chunkfile <- paste0(mydir,myfile,"cog",".RDATA")
+MPPcog <- loadRData(chunkfile)
+fsnames <- names(MPPcog)
+cogvars <- fsnames[-grep("src_",fsnames)]
+
+# Labels for different variable sets:
+cbclabels <- c("Anxious/Depressed","Withdrawn","Somatic Sx","Social Problems","Thought Problems","Attention Problems","Rule Breaking","Aggressive Behavior","Internalizing","Externalizing","Total Problems")
+bislabels <- c("BIS Total","BAS Reward Reactivity","BAS Drive","BAS Fun Seeking")
+uppslabels <- c("Negative Urgency","Lack of Planning","Sensation Seeking","Positive Urgency","Lack of Perseverance")
+coglabels <- c("Picture Vocabulary","Flanker Tes","List Sorting","Card Sorting","Pattern Comparison","Picture Sequence","Oral Reading Recog","Fluid Composite","Crystallized Composite","Cognition Total","RAVLT Short Delay","RAVLT Long Delay","WISC-V Matrix Reasoning")
+
+# Combine Data File
+MPPall <- merge(MPPfs,MPPcog,by="src_subject_id",all=FALSE)
+MPPall <- merge(MPPall,MPPcbcl,by="src_subject_id",all=FALSE)
+MPPall <- merge(MPPall,MPPbis,by="src_subject_id",all=FALSE)
+MPPall <- merge(MPPall,MPPupps,by="src_subject_id",all=FALSE)
+
+# Select Variables for GFA
+fspass_sid <- MPPall[which(MPPall$fsqc_qc=='pass'),"src_subject_id"]
+
+
+```
+
+```{r , Correlation Plots before GFA, fig.height = 8, fig.width = 8  }
+# Set up the data:
+
+# fsvolumevars,fsthickvars,wmvars,lgivars,eegvars,resteegvars,bacsvars
+
+
+THICK <- as.matrix(MPPall[which(MPPall$fsqc_qc=='pass'),c(thickvars_r)])
+SULC <- as.matrix(MPPall[which(MPPall$fsqc_qc=='pass'),c(sulcvars_r)])
+VOL <- as.matrix(MPPall[which(MPPall$fsqc_qc=='pass'),c(volvars_r)])
+SUBCORT <- as.matrix(MPPall[which(MPPall$fsqc_qc=='pass'),c(subcortvars)])
+COG <- as.matrix(MPPall[which(MPPall$fsqc_qc=='pass'),c(cogvars)])
+CBL <- as.matrix(MPPall[which(MPPall$fsqc_qc=='pass'),c(cbclvars)])
+BIS <- as.matrix(MPPall[which(MPPall$fsqc_qc=='pass'),c(bisvars)])
+UPPS <- as.matrix(MPPall[which(MPPall$fsqc_qc=='pass'),c(uppsvars)])
+
+# Subtract the means of each subject:
+rowmeans <- rowMeans(THICK)
+dTHICK <- sweep(THICK,1,rowmeans)
+rowmeans <- rowMeans(SULC)
+dSULC <- sweep(SULC,1,rowmeans)
+rowmeans <- rowMeans(VOL)  
+dVOL <- sweep(VOL,1,rowmeans)
+rowmeans <- rowMeans(SUBCORT)  
+dSUBCORT <- sweep(SUBCORT,1,rowmeans)
+
+corM <- cor(dVOL, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Cortical Volumes - Mean Volume", type = "upper",method='ellipse',
+                   addgrid.col = NA,tl.cex = .4,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(dTHICK, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Cortical Thickness - Mean Volume", type = "upper",method='ellipse',
+                   addgrid.col = NA,tl.cex = .4,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(dSULC, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Sulcal Depth - Mean Volume", type = "upper",method='ellipse',
+                   addgrid.col = NA,tl.cex = .4,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(dSUBCORT, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Subcortical Volumes - Mean Volume", type = "upper",
+                   method='ellipse',addgrid.col = NA, tl.cex = .5,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(COG, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Cognition", type = "upper", method='ellipse',
+                   addgrid.col = NA, tl.cex = .6,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(CBL, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Child Behavior Checklist", type = "upper", method='ellipse',
+                   addgrid.col = NA, tl.cex = .6,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(BIS, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "BIS/BAS", type = "upper", method='ellipse',
+                   addgrid.col = NA, tl.cex = .6,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(UPPS, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "UPPS", type = "upper", method='ellipse',
+                   addgrid.col = NA, tl.cex = .6,tl.col = "black",mar=c(0,0,1,0))
+
+tmp <- cbind(dTHICK,dSULC,dVOL,dSUBCORT,COG,CBL,BIS,UPPS)
+corM <- cor(tmp, method='spearman', use='pair')
+
+corrplot::corrplot(corM, title = "Combined Variables", method='ellipse',
+                   addgrid.col = NA, tl.cex = .2,tl.col = "black",mar=c(0,0,1,0))
+
+```
+
+```{r , Read All GFAs in and compute robust GFAs, eval=TRUE}
+# File components:
+myfile <- c("nda17_1.1_")
+GFAtext <- c("dTHICK_dSULC_dVOL_dSUBCORT_COG_CBL_BIS_UPPS_")
+dateext <- c("_11.30.2018")
+
+res <- list()
+for(i in 1:10){
+print(i)
+myall <- paste0(mydir,myfile,GFAtext,i,dateext,".RData",sep="")
+print(myall)
+load(myall)
+res[[i]] <- myres
+}
+
+block.names <- c('dThickness', 'dSulcalDepth','dGMV','dSubCort','Cog','CBCL','BIS','UPPS')
+
+summ <- w_rob(res,                         # repeated GFA outputs
+              corThr=0.9, matchThr=0.6,  
+              var.exp=T, conf.level=0.95, heatmap.rep=F, sparse=T, forest=T, block.names)
+
+# Save the Robust Assessment
+myall <- paste0(mydir,myfile,GFAtext,"_Robust",dateext,".RData",sep="")
+save(summ, file = myall)
+
+# Save my variance
+myvariance <- rob.var.exp(res,summ$rob)
+myall <- paste0(mydir,myfile,GFAtext,"_Variance",dateext,".RData",sep="")
+save(myvariance, file = myall)
+
+```
+
+```{r Load RGFA Code, echo=TRUE}
+
+# File components:
+myfile <- c("nda17_1.1_")
+GFAtext <- c("dTHICK_dSULC_dVOL_dSUBCORT_COG_CBL_BIS_UPPS_")
+dateext <- c("_11.30.2018")
+
+block.names <- c('dThickness', 'dSulcalDepth','dGMV','dSubCort','Cognition','CBCL','BIS','UPPS')
+
+# Load Robust Assessment
+chunkfile <- paste0(mydir,myfile,GFAtext,"_Robust",dateext,".RData",sep="")
+summ <- loadRData(chunkfile)
+
+# Load my variance
+myvariance <- rob.var.exp(res,summ$rob)
+chunkfile <- paste0(mydir,myfile,GFAtext,"_Variance",dateext,".RData",sep="")
+myvariance <- loadRData(chunkfile)
+
+# Get Average and SEM as well as Cumulative variance explained
+mean_variance <- apply(myvariance$ve.rep,1,mean)
+sem_variance <- apply(myvariance$ve.rep,1,std.error)
+cum_variance <- cumsum(mean_variance)
+
+myprint <- print(data.frame(mean_variance,sem_variance,cum_variance),digits = 2)
+
+kable(myprint, "html",caption = "Robust GFA: Variance Explained",digits=c(2,2,2)) %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+```
+
+
+```{r, setting up the GFA data set for graphing}
+
+###
+# Setting up labels here:
+#
+#
+
+GFAfactorlabels <- c("ABCD_RGFA")
+
+# indepvars <- c(thickvars_r,sulcvars_r,volvars_r,subcortvars,cogvars,cbclvars,bisvars,uppsvars)
+brainlabels <- c(thicklabels,vollabels,sulclabels,subcortvars)
+allblocklabels <- c(brainlabels,coglabels,cbclabels,bislabels,uppslabels)
+
+GFAselect <- colnames(summ$rob$indices)
+PlotNb = summ$rob$Krobust
+varacc <- rowMeans(myvariance$ve.rep)
+  
+myfactors <- paste(GFAfactorlabels, rep(1:length(GFAselect)), sep="")
+mytitles <- {}
+
+# setting up the blocks / views
+allbockvars <- c(thickvars_r,sulcvars_r,volvars_r,subcortvars,cogvars,cbclvars,bisvars,uppsvars)
+
+for(i in 1:length(GFAselect)){
+mytitles  <- cbind(mytitles,paste(GFAfactorlabels,i,": ",round(varacc[i],digits=2),"% Var.",sep=""))
+}
+
+GFAnumber <-0
+GFAvariables <- rep(c(allbockvars), summ$rob$Krobust)
+
+GFAvarlabs <- rep(c(thicklabels,vollabels,sulclabels,subcortvars,
+                    coglabels,cbclabels,bislabels,uppslabels),summ$rob$Krobust)
+
+GFAgroups <- rep(c(rep("dThickness",length(thickvars_r)),
+                    rep("dSulcal D",length(sulcvars_r)),
+                    rep("dVolume",length(volvars_r)),
+                    rep("dSubcortical",length(subcortvars)),
+                    rep("Cognition",length(cogvars)),
+                    rep("CBCL",length(cbclvars)),
+                    rep("BIS",length(bisvars)),
+                   rep("UPPS",length(uppsvars))),summ$rob$Krobust)
+
+myvalues <- array(0,c(length(allbockvars)*summ$rob$Krobust,3))
+myvalues <- summ$w.ci.med[,c(3,4,5)]
+
+GFAlabels <- c("2.5% CI","Median","97.5% CI")
+colnames(myvalues)[1:3] <- c("CI025", "Median", "CI975")
+
+for(i in 1: summ$rob$Krobust){
+  for(j in 1: length(allbockvars)){
+    GFAnumber[j+(i-1)*length(allbockvars)] <- paste0(GFAfactorlabels,i)
+  }
+}
+
+myframe <-data.frame(GFAnumber,GFAgroups,GFAvarlabs,GFAvariables,myvalues)
+myframe$GFAvariables <- factor(myframe$GFAvariables, levels = c(allbockvars))
+
+# Multiply some of the GFAs by -1 to have the direction make more sense:
+# myframe[which(myframe$GFAnumber==paste0(GFAfactorlabels,"2")),c('CI025','Median','CI975')] <-
+#  (-1) * myframe[which(myframe$GFAnumber==paste0(GFAfactorlabels,"2")),c('CI025','Median','CI975')]
+
+
+# Make X Matrix into a data frame
+myGFA <- data.frame(summ$x.rob)
+colnames(myGFA) <- c(paste(GFAfactorlabels,1:summ$rob$Krobust,sep = ""))
+
+# Multiply the GFAs by -1 to have the direction make more sense:
+# myGFA[,c(paste0(GFAfactorlabels,"3"))] <- (-1)* myGFA[,c(paste0(GFAfactorlabels,"3"))]
+
+# Combine together with original data set:
+# File components:
+myfile <- c("nda17_1.1_")
+datatext <-("RGFA_")
+GFAtext <- c("dTHICK_dSULC_dVOL_dSUBCORT_COG_CBL_BIS_UPPS_")
+dateext <- c("12.03.2018")
+
+MPPfs_good <- MPPall[which(MPPall$fsqc_qc=='pass'),]
+
+MPPfs_good <- cbind(MPPfs_good,myGFA)
+myall <- paste(mydir,myfile,datatext,GFAtext,dateext,".RData",sep="")
+save(MPPfs_good, file = myall)
+
+```
+
+# Visualization of Factor Loading Using Circular Graphs
+
+```{r, GFA circular plots ,fig.height = 10, fig.width = 10 }
+
+for(i in 1:length(GFAselect)){
+mycirc <- Circbar(subset(myframe,GFAnumber==myfactors[i]),2,mytitles[i])
+print(mycirc)
+}
+
+```
+
+```{r, Correlation Plot of the GFAs, fig.height = 10, fig.width = 10}
+
+corM <- cor(myGFA, method='spearman', use='pair')
+corrplot::corrplot.mixed(corM,lower = "number",upper = "ellipse",addgrid.col = NA,lower.col = "black",tl.pos = "lt",tl.cex = .7,number.cex = .7,tl.col = "black")
+
+corrplot::corrplot(corM, title = "Correlation between Robust GFAs", method='ellipse',addgrid.col = NA, tl.cex = .7,tl.col = "black",mar=c(0,0,1,0),order = "hclust")
+
+```
